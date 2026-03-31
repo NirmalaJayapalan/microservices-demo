@@ -1,17 +1,3 @@
-# Copyright 2018 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#      http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -28,6 +14,9 @@ spec:
         app: frontend
       annotations:
         sidecar.istio.io/rewriteAppHTTPProbers: "true"
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9115"
+        prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: frontend
       securityContext:
@@ -35,7 +24,29 @@ spec:
         runAsGroup: 1000
         runAsNonRoot: true
         runAsUser: 1000
+
       containers:
+        # -------------------------
+        # Prometheus metrics exporter
+        # -------------------------
+        - name: metrics-exporter
+          image: quay.io/prometheus/blackbox-exporter:latest
+          args:
+            - "--config.file=/config/blackbox.yaml"
+          ports:
+            - name: metrics
+              containerPort: 9115
+          volumeMounts:
+            - name: blackbox-config
+              mountPath: /config
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+
+        # -------------------------
+        # Frontend application
+        # -------------------------
         - name: server
           securityContext:
             allowPrivilegeEscalation: false
@@ -46,57 +57,44 @@ spec:
             readOnlyRootFilesystem: true
           image: gcr.io/google-samples/microservices-demo/frontend:v0.8.0
           ports:
-          - containerPort: 8080
+            - containerPort: 8080
           readinessProbe:
             initialDelaySeconds: 10
             httpGet:
               path: "/_healthz"
               port: 8080
               httpHeaders:
-              - name: "Cookie"
-                value: "shop_session-id=x-readiness-probe"
+                - name: "Cookie"
+                  value: "shop_session-id=x-readiness-probe"
           livenessProbe:
             initialDelaySeconds: 10
             httpGet:
               path: "/_healthz"
               port: 8080
               httpHeaders:
-              - name: "Cookie"
-                value: "shop_session-id=x-liveness-probe"
+                - name: "Cookie"
+                  value: "shop_session-id=x-liveness-probe"
           env:
-          - name: PORT
-            value: "8080"
-          - name: PRODUCT_CATALOG_SERVICE_ADDR
-            value: "productcatalogservice:3550"
-          - name: CURRENCY_SERVICE_ADDR
-            value: "currencyservice:7000"
-          - name: CART_SERVICE_ADDR
-            value: "cartservice:7070"
-          - name: RECOMMENDATION_SERVICE_ADDR
-            value: "recommendationservice:8080"
-          - name: SHIPPING_SERVICE_ADDR
-            value: "shippingservice:50051"
-          - name: CHECKOUT_SERVICE_ADDR
-            value: "checkoutservice:5050"
-          - name: AD_SERVICE_ADDR
-            value: "adservice:9555"
-          - name: SHOPPING_ASSISTANT_SERVICE_ADDR
-            value: "shoppingassistantservice:80"
-          # # ENV_PLATFORM: One of: local, gcp, aws, azure, onprem, alibaba
-          # # When not set, defaults to "local" unless running in GKE, otherwies auto-sets to gcp
-          # - name: ENV_PLATFORM
-          #   value: "aws"
-          - name: ENABLE_PROFILER
-            value: "0"
-          # - name: CYMBAL_BRANDING
-          #   value: "true"
-          # - name: ENABLE_ASSISTANT
-          #   value: "true"
-          # - name: FRONTEND_MESSAGE
-          #   value: "Replace this with a message you want to display on all pages."
-          # As part of an optional Google Cloud demo, you can run an optional microservice called the "packaging service".
-          # - name: PACKAGING_SERVICE_URL
-          #   value: "" # This value would look like "http://123.123.123"
+            - name: PORT
+              value: "8080"
+            - name: PRODUCT_CATALOG_SERVICE_ADDR
+              value: "productcatalogservice:3550"
+            - name: CURRENCY_SERVICE_ADDR
+              value: "currencyservice:7000"
+            - name: CART_SERVICE_ADDR
+              value: "cartservice:7070"
+            - name: RECOMMENDATION_SERVICE_ADDR
+              value: "recommendationservice:8080"
+            - name: SHIPPING_SERVICE_ADDR
+              value: "shippingservice:50051"
+            - name: CHECKOUT_SERVICE_ADDR
+              value: "checkoutservice:5050"
+            - name: AD_SERVICE_ADDR
+              value: "adservice:9555"
+            - name: SHOPPING_ASSISTANT_SERVICE_ADDR
+              value: "shoppingassistantservice:80"
+            - name: ENABLE_PROFILER
+              value: "0"
           resources:
             requests:
               cpu: 100m
@@ -104,6 +102,31 @@ spec:
             limits:
               cpu: 200m
               memory: 128Mi
+
+      volumes:
+        - name: blackbox-config
+          configMap:
+            name: blackbox-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blackbox-config
+data:
+  blackbox.yaml: |
+    modules:
+      http_2xx:
+        prober: http
+        timeout: 5s
+        http:
+          valid_status_codes: [200]
+          method: GET
+          no_follow_redirects: false
+          preferred_ip_protocol: "ip4"
+          headers:
+            Cookie: "shop_session-id=probe"
+          fail_if_body_not_matches_regexp:
+            - ".*"
 ---
 apiVersion: v1
 kind: Service
@@ -116,9 +139,12 @@ spec:
   selector:
     app: frontend
   ports:
-  - name: http
-    port: 80
-    targetPort: 8080
+    - name: http
+      port: 80
+      targetPort: 8080
+    - name: metrics
+      port: 9115
+      targetPort: 9115
 ---
 apiVersion: v1
 kind: Service
@@ -131,9 +157,12 @@ spec:
   selector:
     app: frontend
   ports:
-  - name: http
-    port: 80
-    targetPort: 8080
+    - name: http
+      port: 80
+      targetPort: 8080
+    - name: metrics
+      port: 9115
+      targetPort: 9115
 ---
 apiVersion: v1
 kind: ServiceAccount
